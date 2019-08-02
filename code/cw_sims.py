@@ -16,6 +16,8 @@ from enterprise.pulsar import Tempo2Pulsar
 from enterprise.signals import signal_base
 from enterprise.signals import white_signals
 from enterprise.signals import gp_signals
+from enterprise.signals import selections
+from enterprise.signals import utils
 import enterprise.constants as const
 
 from enterprise_extensions import models
@@ -84,8 +86,9 @@ def make_sim(datadir, fgw, h, endtime=None, psrlist=None,
     libs_psrs = []
 
     for p,t in zip(parfiles, timfiles):
-        if p.split('/')[-1][:-4] in psrlist:
-            libs_psrs.append(T2.tempopulsar(p, t, maxobs=30000))
+        for psrname in psrlist:
+            if psrname in p.split('/')[-1]:
+                libs_psrs.append(T2.tempopulsar(p, t, maxobs=30000))
 
     Tmaxyr = np.array([(max(p.toas()) - min(p.toas()))/3.16e7
                        for p in libs_psrs]).max()
@@ -152,26 +155,57 @@ def make_sim(datadir, fgw, h, endtime=None, psrlist=None,
         return filter_by_mjd(psrs, endtime)
     
     
-def initialize_pta_sim(psrs, fgw):
+def initialize_pta_sim(psrs, fgw,
+                       inc_efac=True, inc_equad=False, inc_ecorr=False,
+                       selection=None,
+                       inc_red_noise=False, noisedict=None):
     
     # continuous GW signal
     s = models.cw_block_circ(log10_fgw=np.log10(fgw), psrTerm=True)
     
-    # white noise
-    efac = parameter.Constant(1.0)
-    s += white_signals.MeasurementNoise(efac=efac)
-    
     # linearized timing model
     s += gp_signals.TimingModel(use_svd=True)
 
+    # white noise
+    if selection == 'backend':
+        selection = selections.Selection(selections.by_backend)
+
+    if inc_efac:
+        efac = parameter.Constant()
+        s += white_signals.MeasurementNoise(efac=efac, selection=selection)
+    
+    if inc_equad:
+        equad = parameter.Constant()
+        s += white_signals.EquadNoise(log10_equad=equad,
+                                      selection=selection)
+    if inc_ecorr:
+        ecorr = parameter.Constant()
+        s += gp_signals.EcorrBasisModel(log10_ecorr=ecorr,
+                                        selection=selection)
+
+    if inc_red_noise:
+        log10_A = parameter.Constant()
+        gamma = parameter.Constant()
+        pl = utils.powerlaw(log10_A=log10_A, gamma=gamma)
+        s += gp_signals.FourierBasisGP(pl, components=30)
+
     model = [s(psr) for psr in psrs]
     pta = signal_base.PTA(model)
+
+    # set white noise parameters
+    if noisedict is None:
+        print('No noise dictionary provided!...')
+    else:
+        pta.set_default_params(noisedict)
     
     return pta
 
 
 def compute_det_prob(fgw, h, nreal, fap, 
                      datadir, endtime=None, psrlist=None, 
+                     inc_efac=True, inc_equad=False, inc_ecorr=False, 
+                     selection=None, 
+                     inc_red_noise=False, noisedict=None, 
                      gwtheta=None, gwphi=None, phase0=None, 
                      inc=None, psi=None, mc=None,
                      cosgwtheta_range=None, gwphi_range=None):
@@ -197,8 +231,11 @@ def compute_det_prob(fgw, h, nreal, fap,
             for psr in psrs:
                 setpars.update({'{0}_efac'.format(psr.name): 1.0})
 
-            pta = initialize_pta_sim(psrs, fgw)
-            fp = F_statistic.FpStat(psrs, params=setpars, pta=pta)
+            pta = initialize_pta_sim(psrs, fgw, 
+                                     inc_efac=inc_efac, inc_equad=inc_equad, inc_ecorr=inc_ecorr, 
+                                     selection=selection, 
+                                     inc_red_noise=inc_red_noise, noisedict=noisedict)
+            fp = F_statistic.FpStat(psrs, params=noisedict, pta=pta)
             fap0 = fp.compute_fap(fgw)
 
             count += 1
